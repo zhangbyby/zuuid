@@ -118,6 +118,10 @@ struct Cli {
     /// Output UUID with hyphens in full format (36 chars)
     #[arg(short = 'f', long = "full", visible_short_alias = 'F')]
     full: bool,
+
+    /// Number of UUIDs to generate (default: 1)
+    #[arg(short = 'n', long = "count", default_value = "1")]
+    count: usize,
 }
 
 /// Determine format precedence based on argument order
@@ -212,7 +216,9 @@ fn main() {
         print_conflict_warning(prefer_full);
     }
 
-    println!("{}", generate_uuid(cli.version, cli.uppercase, cli.simple, cli.full, prefer_full));
+    for _ in 0..cli.count {
+        println!("{}", generate_uuid(cli.version, cli.uppercase, cli.simple, cli.full, prefer_full));
+    }
 }
 
 #[cfg(test)]
@@ -559,5 +565,32 @@ mod tests {
         let cli = Cli::try_parse_from(["zuuid", "-Uf"]).unwrap();
         assert!(cli.full);
         assert!(cli.uppercase);
+    }
+
+    #[test]
+    fn test_cli_parse_default_count() {
+        let cli = Cli::try_parse_from(["zuuid"]).unwrap();
+        assert_eq!(cli.count, 1);
+    }
+
+    #[test]
+    fn test_cli_parse_count_short() {
+        let cli = Cli::try_parse_from(["zuuid", "-n", "5"]).unwrap();
+        assert_eq!(cli.count, 5);
+    }
+
+    #[test]
+    fn test_cli_parse_count_long() {
+        let cli = Cli::try_parse_from(["zuuid", "--count", "10"]).unwrap();
+        assert_eq!(cli.count, 10);
+    }
+
+    #[test]
+    fn test_cli_parse_count_with_other_options() {
+        let cli = Cli::try_parse_from(["zuuid", "-n", "3", "-U", "-s", "-V", "7"]).unwrap();
+        assert_eq!(cli.count, 3);
+        assert!(cli.uppercase);
+        assert!(cli.simple);
+        assert_eq!(cli.version, UuidVersion::V7);
     }
 }
