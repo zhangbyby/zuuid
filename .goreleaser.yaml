@@ -24,8 +24,7 @@ builds:
 
 archives:
   - id: archive
-    format:
-      - tar.gz
+    format: tar.gz
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
@@ -33,8 +32,7 @@ archives:
       {{- .Arch }}
     format_overrides:
       - goos: windows
-        format:
-          - zip
+        format: zip
 
 checksum:
   name_template: "checksums.txt"
@@ -58,7 +56,7 @@ brews:
       owner: zhangbyby
       name: homebrew-tap
       token: "{{ .Env.GH_PAT }}"
-      directory: Formula
+    directory: Formula
     homepage: "https://github.com/zhangbyby/zuuid"
     description: "A simple uuid generator"
     license: MIT
