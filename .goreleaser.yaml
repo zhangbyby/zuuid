@@ -1,0 +1,68 @@
+version: 2
+
+project_name: zuuid
+
+before:
+  hooks:
+    - rustup default stable
+    - cargo install --locked cargo-zigbuild
+    - cargo fetch --locked
+
+builds:
+  - id: zuuid
+    builder: rust
+    binary: zuuid
+    command: zigbuild
+    flags:
+      - --release
+    targets:
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+      - x86_64-pc-windows-gnu
+
+archives:
+  - id: archive
+    format:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Version }}_
+      {{- .Arch }}
+    format_overrides:
+      - goos: windows
+        format:
+          - zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: zhangbyby
+    name: zuuid
+
+brews:
+  - name: zuuid
+    repository:
+      owner: zhangbyby
+      name: homebrew-tap
+      token: "{{ .Env.GH_PAT }}"
+      directory: Formula
+    homepage: "https://github.com/zhangbyby/zuuid"
+    description: "A simple uuid generator"
+    license: MIT
+    install: |
+      bin.install "zuuid"
+    test: |
+      system "#{bin}/zuuid", "--version"
