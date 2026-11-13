@@ -36,20 +36,21 @@ This is a single-binary CLI tool (`src/main.rs`) with no modules. The codebase u
 ### Key Components
 
 **Language Detection (`Language` enum, `Messages` struct):**
-- Auto-detects locale from `LANG`, `LC_ALL`, or `LC_MESSAGES` environment variables
+- Selects the first nonempty locale from `LC_ALL`, `LC_MESSAGES`, then `LANG`
 - Supports English and Chinese with localized error/warning messages
-- Defaults to English if no Chinese locale is detected
+- Defaults to English when the selected locale is not Chinese
 
 **Format Precedence (`determine_format_precedence`):**
 - Handles conflicting `-f` (full/hyphens) and `-s` (simple/no hyphens) flags
-- Parses raw command-line args to determine flag order
-- Uses composite position (arg_index * 1000 + char_offset) for combined flags like `-fs`, `-sf`
+- Uses clap ArgMatches occurrence indices, including combined flags like `-fs`, `-sf`
+- Never scans long option names as individual flags
 - Returns `(prefer_full, conflict_detected)` tuple
 
-**UUID Generation (`generate_uuid`):**
+**UUID Generation (`write_uuids`, `encode_uuid`):**
 - Uses `Uuid::new_v4()` for random UUIDs
 - Uses `Uuid::now_v7()` for time-ordered UUIDs
-- Applies formatting (uppercase, hyphens) after generation
+- Resolves OutputFormat once and encodes in a reusable stack buffer
+- Uses buffered output and handles BrokenPipe without panicking
 
 **CLI Arguments (`Cli` struct):**
 - clap derive with short/long aliases (e.g., `-U`/`-u` for uppercase, `-s`/`-S` for simple)
@@ -60,3 +61,5 @@ This is a single-binary CLI tool (`src/main.rs`) with no modules. The codebase u
 
 - `uuid`: v4 and v7 UUID generation
 - `clap`: CLI argument parsing with derive feature
+
+Minimum Rust version: 1.89. Program version is available through `--version`; `-V` remains UUID-version selection.

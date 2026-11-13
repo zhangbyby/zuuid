@@ -4,14 +4,25 @@
 
 ## 安装
 
+从源码构建需要 Rust 1.89 或更新版本。
+
+Homebrew 安装：
+
+```sh
+brew install zhangbyby/tap/zuuid
+```
+
+从源码安装：
+
 ```bash
-cargo install zuuid
+cargo install --path .
 ```
 
 ## 卸载
 
 ```bash
-cargo uninstall zuuid
+brew uninstall zuuid     # Homebrew 安装
+cargo uninstall zuuid    # Cargo 安装
 ```
 
 ## 常用参数
@@ -66,3 +77,31 @@ for i in {1..3}; do zuuid -v7 -s; sleep 0.01; done
 zuuid -fs  # 完整格式（-f 在前）
 zuuid -sf  # 简单格式（-s 在前）
 ```
+
+
+## 行为与开发检查
+
+格式优先级由 clap 解析后的参数位置决定，不扫描长参数名称；`--uuid-version 7 -fs` 与 `-fs` 都输出完整格式。语言选择优先级为第一个非空的 `LC_ALL`、`LC_MESSAGES`、`LANG`，不支持的语言回退到英文。
+
+批量输出使用一次 stdout 锁、缓冲写入和复用的 UUID 编码缓冲区。下游提前关闭管道（如 `zuuid -n 100000 | head -n 1`）时正常退出；其他输出错误返回非零退出码。`-n 0` 不产生输出。
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+python3 -m unittest discover -s tests -p 'test_*.py'
+actionlint
+goreleaser check
+```
+
+Rust 集成测试覆盖真实 CLI 的格式优先级、版本参数、语言、批量输出、关闭管道和 Unix 非 UTF-8 程序名。最新稳定依赖为 `uuid 1.29.2`、`clap 4.6.7`；UUID 的最低 Rust 版本要求为 1.89。
+
+## 发布流水线
+
+普通分支推送和 PR 在 Linux、macOS、Windows 上执行检查、测试和发布构建，另用 Rust 1.89 检查最低版本兼容性。发布标签会先调用同一套 CI，通过后才运行发布任务。
+
+发布前先更新并提交 `Cargo.toml`、`Cargo.lock` 中的项目版本，再推送一致的 `v<版本>` 标签。稳定版会发布五种目标的归档及 SHA-256，并更新 `zhangbyby/homebrew-tap` 的 `Formula/zuuid.rb`；预发布版本仅创建 GitHub prerelease，不更新稳定版 Formula。
+
+GoReleaser 固定为 2.20.2，cargo-zigbuild 固定为 0.24.1，构建使用 `--locked`。发布 runner 使用 macOS 提供 Apple SDK：四个 Unix 目标使用 Zig 0.15.2，Windows GNU 目标使用 Cargo 和 MinGW（cargo-zigbuild 不支持 Windows 目标）。
+
+Homebrew Formula 从实际的 macOS/Linux、Intel/ARM 四个归档计算校验值生成，不依赖已弃用的 GoReleaser `brews` 配置。Release 使用内置 `GITHUB_TOKEN`；更新 tap 继续使用已有 `GH_PAT` Secret，需对 tap 仓库具有 Contents 写权限。Formula 的测试检查程序版本及 UUIDv4 输出。

@@ -179,27 +179,22 @@ fn determine_format_precedence() -> (bool, bool)
 - Single-file binary: all code in `src/main.rs`
 - No internal modules or separate library crate
 - Dependencies: `uuid` (with `v4`, `v7` features), `clap` (with `derive` feature)
-- Rust edition: 2024
+- Rust edition: 2024; minimum Rust: 1.89
 
 ## Common Patterns
 
 ### Format Precedence
 
-When conflicting flags are provided (e.g., both `-f` and `-s`), use argument order to determine precedence:
+Use clap `ArgMatches` occurrence indices to preserve first-format-flag precedence, including combined short flags. Never scan raw command-line strings: long options like `--uuid-version` contain characters that are not flags.
 
 ```rust
-for (i, arg) in args.iter().enumerate() {
-    // Use composite position: arg_index * 1000 + char_offset
-    let pos = i * 1000 + j;
-}
+matches.index_of("full") < matches.index_of("simple")
 ```
+
+Only compare positions when both flags are explicitly set. Locale selection uses the first nonempty value in `LC_ALL`, `LC_MESSAGES`, `LANG` order. Use child-process environments for tests instead of mutating the test process environment.
 
 ### UUID Generation
 
-```rust
-let id = match version {
-    UuidVersion::V4 => Uuid::new_v4(),
-    UuidVersion::V7 => Uuid::now_v7(),
-};
-let output = if simple { id.as_simple().to_string() } else { id.to_string() };
-```
+Resolve `OutputFormat` once. `write_uuids` generates UUIDs and passes them to `encode_uuid`, reusing `Uuid::encode_buffer()` and the lower/uppercase encoder. Write through a single buffered stdout lock; propagate write/flush errors and treat `BrokenPipe` as successful early termination.
+
+`--version` reports the program version; `-V` / `-v` still selects UUID v4/v7. Integration tests in `tests/cli.rs` exercise the real executable.

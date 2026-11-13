@@ -1,37 +1,111 @@
-name: release
+name: Release
 
 on:
-    push:
-        tags:
-            - "v*"
+  push:
+    tags:
+      - "v*"
 
 permissions:
-    contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-    goreleaser:
-        runs-on: ubuntu-latest
+  quality:
+    uses: ./.github/workflows/ci.yml
 
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-              with:
-                  fetch-depth: 0
-            
-            - name: Setup Rustup
-              uses: dtolnay/rust-toolchain@stable
+  release:
+    needs: quality
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-            - name: Setup Zig
-              uses: mlugg/setup-zig@v2
-              with:
-                version: 0.15.2
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
-            - name: Run GoReleaser
-              uses: goreleaser/goreleaser-action@v7
-              with:
-                  distribution: goreleaser
-                  version: "~> v2"
-                  args: release --clean
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  GH_PAT: ${{ secrets.GH_PAT }}
+      - name: Check release prerequisites
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Release tag must match Cargo.toml version: v$version"
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_NAME" != *-* ]]; then
+            if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "::error::Stable Homebrew releases require a numeric major.minor.patch version."
+              exit 1
+            fi
+            if [ -z "$GH_PAT" ]; then
+              echo "::error::GH_PAT is required to update zhangbyby/homebrew-tap for stable releases."
+              exit 1
+            fi
+          fi
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-pc-windows-gnu
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install cross compiler
+        run: |
+          cargo install --locked cargo-zigbuild --version 0.24.1
+          brew install mingw-w64
+
+      - name: Build and publish release
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.20.2
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate stable Homebrew formula
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: python3 scripts/generate_homebrew.py --version "${GITHUB_REF_NAME#v}"
+
+      - name: Checkout Homebrew tap
+        if: ${{ !contains(github.ref_name, '-') }}
+        uses: actions/checkout@v4
+        with:
+          repository: zhangbyby/homebrew-tap
+          token: ${{ secrets.GH_PAT }}
+          path: .tap
+
+      - name: Update stable Homebrew formula
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          mkdir -p .tap/Formula
+          cp dist/zuuid.rb .tap/Formula/zuuid.rb
+          cd .tap
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/zuuid.rb
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: update zuuid to $GITHUB_REF_NAME"
+          for attempt in 1 2 3; do
+            echo "Pushing Homebrew formula (attempt $attempt/3)"
+            if git push; then
+              exit 0
+            fi
+            git pull --rebase
+          done
+          exit 1

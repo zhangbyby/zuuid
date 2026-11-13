@@ -1,5 +1,8 @@
-use clap::Parser;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use uuid::Uuid;
+
+use std::io::{self, BufWriter, Write};
+use std::process::ExitCode;
 
 /// Language setting for internationalization
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,16 +15,15 @@ impl Language {
     /// Detect system language from environment variables
     /// Defaults to English if detection fails or language is not supported
     fn detect() -> Self {
-        // Check LANG, LC_ALL, LC_MESSAGES environment variables
-        for var in ["LANG", "LC_ALL", "LC_MESSAGES"] {
-            if let Ok(lang) = std::env::var(var) {
-                if lang.to_lowercase().starts_with("zh") {
-                    return Language::Chinese;
-                }
-            }
+        let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .into_iter()
+            .filter_map(|key| std::env::var(key).ok())
+            .find(|value| !value.is_empty());
+        if locale.is_some_and(|value| value.to_ascii_lowercase().starts_with("zh")) {
+            Self::Chinese
+        } else {
+            Self::English
         }
-        // Default to English if no Chinese locale detected or on error
-        Language::English
     }
 }
 
@@ -81,9 +83,9 @@ impl std::str::FromStr for UuidVersion {
         let lang = Language::detect();
         let msgs = Messages::new(lang);
 
-        match s.to_lowercase().as_str() {
-            "4" | "v4" => Ok(UuidVersion::V4),
-            "7" | "v7" => Ok(UuidVersion::V7),
+        match s {
+            "4" | "v4" | "V4" => Ok(UuidVersion::V4),
+            "7" | "v7" | "V7" => Ok(UuidVersion::V7),
             _ => Err(msgs.invalid_version(s)),
         }
     }
@@ -100,11 +102,20 @@ impl std::fmt::Display for UuidVersion {
 
 /// UUID generator tool
 #[derive(Parser)]
-#[command(name = "zuuid")]
+#[command(name = "zuuid", version, disable_version_flag = true)]
 #[command(about = "Generate UUID v4/v7", long_about = None)]
 struct Cli {
+    /// Print program version (use -V to select the UUID version)
+    #[arg(long = "version", action = clap::ArgAction::Version)]
+    _display_version: Option<bool>,
+
     /// UUID version to generate (4 or 7, default: 4)
-    #[arg(short = 'V', long = "uuid-version", visible_short_alias = 'v', default_value = "4")]
+    #[arg(
+        short = 'V',
+        long = "uuid-version",
+        visible_short_alias = 'v',
+        default_value = "4"
+    )]
     version: UuidVersion,
 
     /// Output UUID in uppercase
@@ -124,44 +135,20 @@ struct Cli {
     count: usize,
 }
 
-/// Determine format precedence based on argument order
-/// Returns (prefer_full, conflict_detected)
-fn determine_format_precedence() -> (bool, bool) {
-    let args: Vec<String> = std::env::args().collect();
+/// UUID text format, resolved once before generating any output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputFormat {
+    Full,
+    Simple,
+}
 
-    // Find positions of format-related flags
-    let mut full_pos = None;
-    let mut simple_pos = None;
-
-    for (i, arg) in args.iter().enumerate() {
-        // Check for combined flags like -fs, -sf, -fS, -Sf, etc.
-        if arg.starts_with('-') && arg.len() > 1 {
-            let flags = &arg[1..]; // Remove leading '-'
-            for (j, ch) in flags.chars().enumerate() {
-                match ch {
-                    'f' | 'F' => {
-                        if full_pos.is_none() {
-                            full_pos = Some(i * 1000 + j); // Use composite position
-                        }
-                    }
-                    's' | 'S' => {
-                        if simple_pos.is_none() {
-                            simple_pos = Some(i * 1000 + j);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    match (full_pos, simple_pos) {
-        (Some(f), Some(s)) => {
-            // Both flags present, check order
-            let prefer_full = f < s;
-            (prefer_full, true)
-        }
-        _ => (true, false), // Default to full, no conflict
+/// Determine format precedence from clap's parsed occurrence indices.
+/// Returns (prefer_full, conflict_detected). Defaults are not occurrences.
+fn determine_format_precedence(matches: &ArgMatches) -> (bool, bool) {
+    if matches.get_flag("full") && matches.get_flag("simple") {
+        (matches.index_of("full") < matches.index_of("simple"), true)
+    } else {
+        (true, false)
     }
 }
 
@@ -170,54 +157,74 @@ fn print_conflict_warning(prefer_full: bool) {
     let lang = Language::detect();
     let msgs = Messages::new(lang);
 
-    eprintln!("\x1b[33m{}\x1b[0m", msgs.conflict_warning());
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr, "\x1b[33m{}\x1b[0m", msgs.conflict_warning());
     if prefer_full {
-        eprintln!("\x1b[33m{}\x1b[0m", msgs.using_full());
+        let _ = writeln!(stderr, "\x1b[33m{}\x1b[0m", msgs.using_full());
     } else {
-        eprintln!("\x1b[33m{}\x1b[0m", msgs.using_simple());
+        let _ = writeln!(stderr, "\x1b[33m{}\x1b[0m", msgs.using_simple());
     }
 }
 
-/// Generate a formatted UUID string based on the given options
-fn generate_uuid(version: UuidVersion, uppercase: bool, simple: bool, full: bool, prefer_full: bool) -> String {
-    let id = match version {
-        UuidVersion::V4 => Uuid::new_v4(),
-        UuidVersion::V7 => Uuid::now_v7(),
-    };
-
-    // Determine format based on flags and precedence
-    let output = if full && simple {
-        // Both flags set, use precedence
-        if prefer_full {
-            id.to_string()
-        } else {
-            id.as_simple().to_string()
-        }
-    } else if full {
-        id.to_string()
-    } else if simple {
-        id.as_simple().to_string()
-    } else {
-        id.to_string()
-    };
-
-    if uppercase {
-        output.to_uppercase()
-    } else {
-        output
+/// Encode UUID text in a reusable stack buffer, without per-UUID allocation.
+fn encode_uuid<'a>(
+    id: &Uuid,
+    uppercase: bool,
+    format: OutputFormat,
+    buffer: &'a mut [u8; 45],
+) -> &'a str {
+    match (format, uppercase) {
+        (OutputFormat::Full, false) => id.hyphenated().encode_lower(buffer),
+        (OutputFormat::Full, true) => id.hyphenated().encode_upper(buffer),
+        (OutputFormat::Simple, false) => id.simple().encode_lower(buffer),
+        (OutputFormat::Simple, true) => id.simple().encode_upper(buffer),
     }
 }
 
-fn main() {
-    let (prefer_full, conflict) = determine_format_precedence();
-    let cli = Cli::parse();
+/// Write a batch of UUIDs, propagating output and final flush failures.
+fn write_uuids(
+    output: &mut impl Write,
+    version: UuidVersion,
+    uppercase: bool,
+    format: OutputFormat,
+    count: usize,
+) -> io::Result<()> {
+    let mut buffer = Uuid::encode_buffer();
+    for _ in 0..count {
+        let id = match version {
+            UuidVersion::V4 => Uuid::new_v4(),
+            UuidVersion::V7 => Uuid::now_v7(),
+        };
+        writeln!(
+            output,
+            "{}",
+            encode_uuid(&id, uppercase, format, &mut buffer)
+        )?;
+    }
+    output.flush()
+}
 
+fn main() -> ExitCode {
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let (prefer_full, conflict) = determine_format_precedence(&matches);
     if conflict {
         print_conflict_warning(prefer_full);
     }
-
-    for _ in 0..cli.count {
-        println!("{}", generate_uuid(cli.version, cli.uppercase, cli.simple, cli.full, prefer_full));
+    let format = if cli.simple && (!cli.full || !prefer_full) {
+        OutputFormat::Simple
+    } else {
+        OutputFormat::Full
+    };
+    let stdout = io::stdout();
+    let mut output = BufWriter::new(stdout.lock());
+    match write_uuids(&mut output, cli.version, cli.uppercase, format, cli.count) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(error) => {
+            let _ = writeln!(io::stderr().lock(), "zuuid: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -225,9 +232,18 @@ fn main() {
 mod tests {
     use super::*;
 
+    fn generate_uuid(version: UuidVersion, uppercase: bool, format: OutputFormat) -> String {
+        let mut output = Vec::new();
+        write_uuids(&mut output, version, uppercase, format, 1).unwrap();
+        String::from_utf8(output)
+            .unwrap()
+            .trim_end_matches('\n')
+            .to_owned()
+    }
+
     #[test]
     fn test_generate_default_format() {
-        let uuid = generate_uuid(UuidVersion::V4, false, false, false, false);
+        let uuid = generate_uuid(UuidVersion::V4, false, OutputFormat::Full);
         // Default format: lowercase with hyphens (8-4-4-4-12)
         assert!(uuid.len() == 36);
         assert!(uuid.contains('-'));
@@ -238,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_generate_uppercase_format() {
-        let uuid = generate_uuid(UuidVersion::V4, true, false, false, false);
+        let uuid = generate_uuid(UuidVersion::V4, true, OutputFormat::Full);
         // Uppercase format with hyphens
         assert!(uuid.len() == 36);
         assert!(uuid.contains('-'));
@@ -249,7 +265,7 @@ mod tests {
 
     #[test]
     fn test_generate_simple_format() {
-        let uuid = generate_uuid(UuidVersion::V4, false, true, false, false);
+        let uuid = generate_uuid(UuidVersion::V4, false, OutputFormat::Simple);
         // Simple format: lowercase without hyphens
         assert!(uuid.len() == 32);
         assert!(!uuid.contains('-'));
@@ -259,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_generate_uppercase_simple_format() {
-        let uuid = generate_uuid(UuidVersion::V4, true, true, false, false);
+        let uuid = generate_uuid(UuidVersion::V4, true, OutputFormat::Simple);
         // Uppercase simple format
         assert!(uuid.len() == 32);
         assert!(!uuid.contains('-'));
@@ -269,33 +285,33 @@ mod tests {
 
     #[test]
     fn test_uuid_v4_uniqueness() {
-        let uuid1 = generate_uuid(UuidVersion::V4, false, false, false, false);
-        let uuid2 = generate_uuid(UuidVersion::V4, false, false, false, false);
+        let uuid1 = generate_uuid(UuidVersion::V4, false, OutputFormat::Full);
+        let uuid2 = generate_uuid(UuidVersion::V4, false, OutputFormat::Full);
         // Two UUIDs should be different (extremely unlikely to be the same)
         assert_ne!(uuid1, uuid2);
     }
 
     #[test]
     fn test_uuid_v7_uniqueness() {
-        let uuid1 = generate_uuid(UuidVersion::V7, false, false, false, false);
+        let uuid1 = generate_uuid(UuidVersion::V7, false, OutputFormat::Full);
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let uuid2 = generate_uuid(UuidVersion::V7, false, false, false, false);
+        let uuid2 = generate_uuid(UuidVersion::V7, false, OutputFormat::Full);
         // Two V7 UUIDs should be different
         assert_ne!(uuid1, uuid2);
     }
 
     #[test]
     fn test_uuid_v7_ordered() {
-        let uuid1 = generate_uuid(UuidVersion::V7, false, false, false, false);
+        let uuid1 = generate_uuid(UuidVersion::V7, false, OutputFormat::Full);
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let uuid2 = generate_uuid(UuidVersion::V7, false, false, false, false);
+        let uuid2 = generate_uuid(UuidVersion::V7, false, OutputFormat::Full);
         // V7 UUIDs should be time-ordered (uuid2 > uuid1)
         assert!(uuid2 > uuid1);
     }
 
     #[test]
     fn test_uuid_valid_format() {
-        let uuid = generate_uuid(UuidVersion::V4, false, false, false, false);
+        let uuid = generate_uuid(UuidVersion::V4, false, OutputFormat::Full);
         // Check standard UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
         let parts: Vec<&str> = uuid.split('-').collect();
         assert_eq!(parts.len(), 5);
@@ -308,7 +324,7 @@ mod tests {
 
     #[test]
     fn test_uuid_hex_chars() {
-        let uuid = generate_uuid(UuidVersion::V4, false, true, false, false);
+        let uuid = generate_uuid(UuidVersion::V4, false, OutputFormat::Simple);
         // All characters should be valid hex digits
         assert!(uuid.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -493,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_generate_full_format() {
-        let uuid = generate_uuid(UuidVersion::V4, false, false, true, true);
+        let uuid = generate_uuid(UuidVersion::V4, false, OutputFormat::Full);
         // Full format: lowercase with hyphens (36 chars)
         assert!(uuid.len() == 36);
         assert!(uuid.contains('-'));
@@ -502,27 +518,11 @@ mod tests {
 
     #[test]
     fn test_generate_full_uppercase_format() {
-        let uuid = generate_uuid(UuidVersion::V4, true, false, true, true);
+        let uuid = generate_uuid(UuidVersion::V4, true, OutputFormat::Full);
         // Full uppercase format
         assert!(uuid.len() == 36);
         assert!(uuid.contains('-'));
         assert!(!uuid.chars().any(|c| c.is_ascii_lowercase()));
-    }
-
-    #[test]
-    fn test_conflict_simple_wins() {
-        let uuid = generate_uuid(UuidVersion::V4, false, true, true, false);
-        // When prefer_full is false, simple wins
-        assert!(uuid.len() == 32);
-        assert!(!uuid.contains('-'));
-    }
-
-    #[test]
-    fn test_conflict_full_wins() {
-        let uuid = generate_uuid(UuidVersion::V4, false, true, true, true);
-        // When prefer_full is true, full wins
-        assert!(uuid.len() == 36);
-        assert!(uuid.contains('-'));
     }
 
     #[test]
